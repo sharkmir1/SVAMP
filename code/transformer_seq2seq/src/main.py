@@ -231,7 +231,7 @@ def main():
 
 				logger.info('Prediction from')
 				od = OrderedDict()
-				od['epoch'] = ep_offset
+				od['epoch'] = epoch_offset
 				od['min_train_loss'] = min_train_loss
 				od['min_val_loss'] = min_val_loss
 				od['max_train_acc'] = max_train_acc
@@ -370,7 +370,7 @@ def main():
 
 			logger.info('Prediction from')
 			od = OrderedDict()
-			od['epoch'] = ep_offset
+			od['epoch'] = epoch_offset
 			od['min_train_loss'] = min_train_loss
 			od['min_val_loss'] = min_val_loss
 			od['max_train_acc'] = max_train_acc

@@ -5,7 +5,10 @@ import logging
 import pdb
 import random
 from time import time
+
+import ipdb
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch import optim
@@ -15,7 +18,7 @@ from transformers import AdamW
 # from pytorch_pretrained_bert.optimization import BertAdam
 # from tensorboardX import SummaryWriter
 from gensim import models
-from src.components.contextual_embeddings import BertEncoder, RobertaEncoder
+from src.components.contextual_embeddings import RobertaEncoder
 from src.utils.sentence_processing import *
 from src.utils.logger import print_log, store_results
 from src.utils.helper import save_checkpoint, bleu_scorer
@@ -23,17 +26,19 @@ from src.utils.evaluate import cal_score, stack_to_string, get_infix_eq
 
 from collections import OrderedDict
 
+
 class PositionalEncoding(nn.Module):
 	def __init__(self, d_model, dropout=0.1, max_len=5000):
 		super(PositionalEncoding, self).__init__()
 		self.dropout = nn.Dropout(p=dropout)
-		self.scale = nn.Parameter(torch.ones(1)) # nn.Parameter causes the tensor to appear in the model.parameters()
+		self.scale = nn.Parameter(torch.ones(1))  # nn.Parameter causes the tensor to appear in the model.parameters()
 
 		pe = torch.zeros(max_len, d_model)
-		position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1) # max_len x 1
-		div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)) # torch.arange(0, d_model, 2) gives 2i
-		pe[:, 0::2] = torch.sin(position * div_term) # all alternate columns 0 onwards
-		pe[:, 1::2] = torch.cos(position * div_term) # all alternate columns 1 onwards
+		position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  # max_len x 1
+		div_term = torch.exp(torch.arange(0, d_model, 2).float() * (
+				-math.log(10000.0) / d_model))  # torch.arange(0, d_model, 2) gives 2i
+		pe[:, 0::2] = torch.sin(position * div_term)  # all alternate columns 0 onwards
+		pe[:, 1::2] = torch.cos(position * div_term)  # all alternate columns 1 onwards
 		pe = pe.unsqueeze(0).transpose(0, 1)
 		self.register_buffer('pe', pe)
 
@@ -44,13 +49,14 @@ class PositionalEncoding(nn.Module):
 			Returns:
 				z (tensor) : embeddings with positional encoding | size : [max_len x batch_size x d_model]
 		'''
-		
+
 		x = x + self.scale * self.pe[:x.size(0), :]
 		z = self.dropout(x)
 		return z
 
+
 class TransformerModel(nn.Module):
-	def __init__(self, config, voc1, voc2, device, logger, EOS_tag = '</s>', SOS_tag = '<s>'):
+	def __init__(self, config, voc1, voc2, device, logger, EOS_tag='</s>', SOS_tag='<s>'):
 		super(TransformerModel, self).__init__()
 		self.config = config
 		self.device = device
@@ -64,34 +70,28 @@ class TransformerModel(nn.Module):
 
 		self.logger.debug('Initialising Embeddings.....')
 
-		if self.config.embedding == 'bert':
-			config.d_model = 768
-			self.embedding1 = BertEncoder(self.config.emb_name, self.device, self.config.freeze_emb)
-		elif self.config.embedding == 'roberta':
+		if self.config.embedding == 'roberta':
 			config.d_model = 768
 			self.embedding1 = RobertaEncoder(self.config.emb_name, self.device, self.config.freeze_emb)
-		elif self.config.embedding == 'word2vec':
-			config.d_model = 300
-			self.embedding1  = nn.Embedding.from_pretrained(torch.FloatTensor(self._form_embeddings(self.config.word2vec_bin)), 
-								freeze = self.config.freeze_emb)
 		else:
-			self.embedding1  = nn.Embedding(self.voc1.nwords, self.config.d_model)
+			self.embedding1 = nn.Embedding(self.voc1.nwords, self.config.d_model)
 			nn.init.uniform_(self.embedding1.weight, -1 * self.config.init_range, self.config.init_range)
 
 		self.pos_embedding1 = PositionalEncoding(self.config.d_model, self.config.dropout)
 
-		self.embedding2  = nn.Embedding(self.voc2.nwords, self.config.d_model)
+		self.embedding2 = nn.Embedding(self.voc2.nwords, self.config.d_model)
 		nn.init.uniform_(self.embedding2.weight, -1 * self.config.init_range, self.config.init_range)
-		
+
 		self.pos_embedding2 = PositionalEncoding(self.config.d_model, self.config.dropout)
 
 		self.logger.debug('Embeddings initialised.....')
 		self.logger.debug('Building Transformer Model.....')
 
-		self.transformer = nn.Transformer(d_model=self.config.d_model, nhead=self.config.heads, 
-											num_encoder_layers=self.config.encoder_layers, num_decoder_layers=self.config.decoder_layers, 
-											dim_feedforward=self.config.d_ff, dropout=self.config.dropout)
-		
+		self.transformer = nn.Transformer(d_model=self.config.d_model, nhead=self.config.heads,
+										  num_encoder_layers=self.config.encoder_layers,
+										  num_decoder_layers=self.config.decoder_layers,
+										  dim_feedforward=self.config.d_ff, dropout=self.config.dropout)
+
 		self.fc_out = nn.Linear(self.config.d_model, self.voc2.nwords)
 
 		self.logger.debug('Transformer Model Built.....')
@@ -104,7 +104,7 @@ class TransformerModel(nn.Module):
 
 		self._initialize_optimizer()
 
-		self.criterion = nn.CrossEntropyLoss() # nn.CrossEntropyLoss() does both F.log_softmax() and nn.NLLLoss() 
+		self.criterion = nn.CrossEntropyLoss()  # nn.CrossEntropyLoss() does both F.log_softmax() and nn.NLLLoss()
 
 		self.logger.info('All Model Components Initialized...')
 
@@ -117,7 +117,7 @@ class TransformerModel(nn.Module):
 		'''
 
 		weights_all = models.KeyedVectors.load_word2vec_format(file_path, limit=200000, binary=True)
-		weight_req  = torch.randn(self.voc1.nwords, self.config.d_model)
+		weight_req = torch.randn(self.voc1.nwords, self.config.d_model)
 		for key, value in self.voc1.id2w.items():
 			if value in weights_all:
 				weight_req[key] = torch.FloatTensor(weights_all[value])
@@ -125,35 +125,38 @@ class TransformerModel(nn.Module):
 		return weight_req
 
 	def _initialize_optimizer(self):
-		self.params = list(self.embedding1.parameters()) + list(self.transformer.parameters()) + list(self.fc_out.parameters()) + \
-						list(self.embedding2.parameters()) + list(self.pos_embedding1.parameters()) + list(self.pos_embedding2.parameters())
-		self.non_emb_params = list(self.transformer.parameters()) + list(self.fc_out.parameters()) + list(self.embedding2.parameters()) + \
-								list(self.pos_embedding1.parameters()) + list(self.pos_embedding2.parameters())
+		self.params = list(self.embedding1.parameters()) + list(self.transformer.parameters()) + list(
+			self.fc_out.parameters()) + \
+					  list(self.embedding2.parameters()) + list(self.pos_embedding1.parameters()) + list(
+			self.pos_embedding2.parameters())
+		self.non_emb_params = list(self.transformer.parameters()) + list(self.fc_out.parameters()) + list(
+			self.embedding2.parameters()) + \
+							  list(self.pos_embedding1.parameters()) + list(self.pos_embedding2.parameters())
 
 		if self.config.opt == 'adam':
 			self.optimizer = optim.Adam(
 				[{"params": self.embedding1.parameters(), "lr": self.config.emb_lr},
-				{"params": self.non_emb_params, "lr": self.config.lr}]
+				 {"params": self.non_emb_params, "lr": self.config.lr}]
 			)
 		elif self.config.opt == 'adamw':
 			self.optimizer = optim.AdamW(
 				[{"params": self.embedding1.parameters(), "lr": self.config.emb_lr},
-				{"params": self.non_emb_params, "lr": self.config.lr}]
+				 {"params": self.non_emb_params, "lr": self.config.lr}]
 			)
 		elif self.config.opt == 'adadelta':
 			self.optimizer = optim.Adadelta(
 				[{"params": self.embedding1.parameters(), "lr": self.config.emb_lr},
-				{"params": self.non_emb_params, "lr": self.config.lr}]
+				 {"params": self.non_emb_params, "lr": self.config.lr}]
 			)
 		elif self.config.opt == 'asgd':
 			self.optimizer = optim.ASGD(
 				[{"params": self.embedding1.parameters(), "lr": self.config.emb_lr},
-				{"params": self.non_emb_params, "lr": self.config.lr}]
+				 {"params": self.non_emb_params, "lr": self.config.lr}]
 			)
 		else:
 			self.optimizer = optim.SGD(
 				[{"params": self.embedding1.parameters(), "lr": self.config.emb_lr},
-				{"params": self.non_emb_params, "lr": self.config.lr}]
+				 {"params": self.non_emb_params, "lr": self.config.lr}]
 			)
 
 	def generate_square_subsequent_mask(self, sz):
@@ -165,7 +168,7 @@ class TransformerModel(nn.Module):
 		'''
 
 		mask = torch.triu(torch.ones(sz, sz), 1)
-		mask = mask.masked_fill(mask==1, float('-inf'))
+		mask = mask.masked_fill(mask == 1, float('-inf'))
 		return mask
 
 	def make_len_mask(self, inp):
@@ -178,7 +181,8 @@ class TransformerModel(nn.Module):
 
 		mask = (inp == -1).transpose(0, 1)
 		return mask
-		# return (inp == self.EOS_token).transpose(0, 1)
+
+	# return (inp == self.EOS_token).transpose(0, 1)
 
 	def forward(self, ques, src, trg):
 		'''
@@ -201,9 +205,9 @@ class TransformerModel(nn.Module):
 
 		if self.config.embedding == 'bert' or self.config.embedding == 'roberta':
 			src, src_tokens = self.embedding1(ques)
-			src = src.transpose(0,1)
+			src = src.transpose(0, 1)
 			# src: Tensor [S x BS x d_model]
-			src_pad_mask = self.make_len_mask(src_tokens.transpose(0,1))
+			src_pad_mask = self.make_len_mask(src_tokens.transpose(0, 1))
 			src = self.pos_embedding1(src)
 		else:
 			src_pad_mask = self.make_len_mask(src)
@@ -214,14 +218,16 @@ class TransformerModel(nn.Module):
 		trg = self.embedding2(trg)
 		trg = self.pos_embedding2(trg)
 
-		output = self.transformer(src, trg, src_mask=self.src_mask, tgt_mask=self.trg_mask, memory_mask=self.memory_mask,
-								  src_key_padding_mask=src_pad_mask, tgt_key_padding_mask=trg_pad_mask, memory_key_padding_mask=src_pad_mask)
-		
+		output = self.transformer(src, trg, src_mask=self.src_mask, tgt_mask=self.trg_mask,
+								  memory_mask=self.memory_mask,
+								  src_key_padding_mask=src_pad_mask, tgt_key_padding_mask=trg_pad_mask,
+								  memory_key_padding_mask=src_pad_mask)
+
 		output = self.fc_out(output)
 
 		return output
 
-	def trainer(self, ques, input_seq1, input_seq2, config, device=None ,logger=None):
+	def trainer(self, ques, input_seq1, input_seq2, config, device=None, logger=None):
 		'''
 			Args:
 				ques (list): raw source input | size : [BS]
@@ -231,14 +237,14 @@ class TransformerModel(nn.Module):
 				fin_loss (float) : Train Loss
 		'''
 
-		self.optimizer.zero_grad() # zero out gradients from previous backprop computations
+		self.optimizer.zero_grad()  # zero out gradients from previous backprop computations
 
-		output = self.forward(ques, input_seq1, input_seq2[:-1,:])
+		output = self.forward(ques, input_seq1, input_seq2[:-1, :])
 		# output: (T-1) x BS x voc2.nwords [T-1 because it predicts after start symbol]
 
 		output_dim = output.shape[-1]
-		
-		self.loss = self.criterion(output.view(-1, output_dim), input_seq2[1:,:].view(-1))
+
+		self.loss = self.criterion(output.contiguous().view(-1, output_dim), input_seq2[1:, :].contiguous().view(-1))
 
 		self.loss.backward()
 		if self.config.max_grad_norm > 0:
@@ -249,7 +255,7 @@ class TransformerModel(nn.Module):
 
 		return fin_loss
 
-	def greedy_decode(self, ques=None, input_seq1=None, input_seq2=None, input_len2 = None, validation=False):
+	def greedy_decode(self, ques=None, input_seq1=None, input_seq2=None, input_len2=None, validation=False):
 		'''
 			Args:
 				ques (list): raw source input | size : [BS]
@@ -270,10 +276,10 @@ class TransformerModel(nn.Module):
 
 			if self.config.embedding == 'bert' or self.config.embedding == 'roberta':
 				src, _ = self.embedding1(ques)
-				src = src.transpose(0,1)
+				src = src.transpose(0, 1)
 				# src: Tensor [S x BS x emb1_size]
 				memory = self.transformer.encoder(self.pos_embedding1(src))
-			else: 
+			else:
 				memory = self.transformer.encoder(self.pos_embedding1(self.embedding1(input_seq1)))
 			# memory: S x BS x d_model
 
@@ -287,26 +293,29 @@ class TransformerModel(nn.Module):
 				target_len = self.config.max_length
 
 			for step in range(target_len):
-				decoder_input = torch.LongTensor(input_list).to(self.device) # seq_len x bs
+				decoder_input = torch.LongTensor(input_list).to(self.device)  # seq_len x bs
 
-				decoder_output = self.fc_out(self.transformer.decoder(self.pos_embedding2(self.embedding2(decoder_input)), memory)) # seq_len x bs x voc2.nwords
+				decoder_output = self.fc_out(
+					self.transformer.decoder(self.pos_embedding2(self.embedding2(decoder_input)),
+											 memory))  # seq_len x bs x voc2.nwords
 
 				if validation:
-					loss += self.criterion(decoder_output[-1,:,:], input_seq2[step])
+					loss += self.criterion(decoder_output[-1, :, :], input_seq2[step])
 
-				out_tokens = decoder_output.argmax(2)[-1,:] # bs
+				out_tokens = decoder_output.argmax(2)[-1, :]  # bs
 
 				for i in range(input_seq1.size(1)):
 					if out_tokens[i].item() == self.EOS_token:
 						continue
 					decoded_words[i].append(self.voc2.get_word(out_tokens[i].item()))
-				
+
 				input_list.append(out_tokens.detach().tolist())
 
 			if validation:
-					return loss/target_len, decoded_words
+				return loss / target_len, decoded_words
 			else:
 				return decoded_words
+
 
 def build_model(config, voc1, voc2, device, logger):
 	'''
@@ -325,8 +334,11 @@ def build_model(config, voc1, voc2, device, logger):
 
 	return model
 
-def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, config, logger, epoch_offset= 0, min_val_loss=float('inf'), 
-				max_val_bleu=0.0, max_val_acc = 0.0, min_train_loss=float('inf'), max_train_acc = 0.0, best_epoch = 0, writer= None):
+
+def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, config, logger, epoch_offset=0,
+				min_val_loss=float('inf'),
+				max_val_bleu=0.0, max_val_acc=0.0, min_train_loss=float('inf'), max_train_acc=0.0, best_epoch=0,
+				writer=None):
 	'''
 		Args:
 			model (object of class TransformerModel): model
@@ -352,9 +364,9 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 	if config.histogram and config.save_writer and writer:
 		for name, param in model.named_parameters():
 			writer.add_histogram(name, param, epoch_offset)
-	
-	estop_count=0
-	
+
+	estop_count = 0
+
 	for epoch in range(1, config.epochs + 1):
 		od = OrderedDict()
 		od['Epoch'] = epoch + epoch_offset
@@ -367,7 +379,7 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 		train_acc_epoch_tot = 0.0
 		val_loss_epoch = 0.0
 
-		start_time= time()
+		start_time = time()
 		total_batches = len(train_dataloader)
 
 		for data in train_dataloader:
@@ -375,7 +387,7 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 
 			sent1s = sents_to_idx(voc1, data['ques'], config.max_length, flag=0)
 			sent2s = sents_to_idx(voc2, data['eqn'], config.max_length, flag=1)
-			sent1_var, sent2_var, input_len1, input_len2  = process_batch(sent1s, sent2s, voc1, voc2, device)
+			sent1_var, sent2_var, input_len1, input_len2 = process_batch(sent1s, sent2s, voc1, voc2, device)
 
 			nums = data['nums']
 			ans = data['ans']
@@ -393,16 +405,16 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 				train_acc_epoch_cnt += temp_acc_cnt
 				train_acc_epoch_tot += temp_acc_tot
 
-			print("Completed {} / {}...".format(batch_num, total_batches), end = '\r', flush = True)
-			batch_num+=1
+			print("Completed {} / {}...".format(batch_num, total_batches), end='\r', flush=True)
+			batch_num += 1
 
 		train_loss_epoch = train_loss_epoch / len(train_dataloader)
 		if config.show_train_acc:
-			train_acc_epoch = train_acc_epoch_cnt/train_acc_epoch_tot
+			train_acc_epoch = train_acc_epoch_cnt / train_acc_epoch_tot
 		else:
 			train_acc_epoch = 0.0
 
-		time_taken = (time() - start_time)/60.0
+		time_taken = (time() - start_time) / 60.0
 
 		if config.save_writer and writer:
 			writer.add_scalar('loss/train_loss', train_loss_epoch, epoch + epoch_offset)
@@ -410,8 +422,10 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 		logger.debug('Training for epoch {} completed...\nTime Taken: {}'.format(epoch, time_taken))
 		logger.debug('Starting Validation')
 
-		val_bleu_epoch, val_loss_epoch, val_acc_epoch = run_validation(config=config, model=model, val_dataloader=val_dataloader, 
-																	voc1=voc1, voc2=voc2, device=device, logger=logger, epoch_num = epoch)
+		val_bleu_epoch, val_loss_epoch, val_acc_epoch = run_validation(config=config, model=model,
+																	   val_dataloader=val_dataloader,
+																	   voc1=voc1, voc2=voc2, device=device,
+																	   logger=logger, epoch_num=epoch)
 
 		if train_loss_epoch < min_train_loss:
 			min_train_loss = train_loss_epoch
@@ -430,20 +444,20 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 			best_epoch = epoch + epoch_offset
 
 			state = {
-				'epoch' : epoch + epoch_offset,
+				'epoch': epoch + epoch_offset,
 				'best_epoch': best_epoch,
 				'model_state_dict': model.state_dict(),
 				'voc1': model.voc1,
 				'voc2': model.voc2,
 				'optimizer_state_dict': model.optimizer.state_dict(),
-				'train_loss_epoch' : train_loss_epoch,
-				'min_train_loss' : min_train_loss,
-				'train_acc_epoch' : train_acc_epoch,
-				'max_train_acc' : max_train_acc,
-				'val_loss_epoch' : val_loss_epoch,
-				'min_val_loss' : min_val_loss,
-				'val_acc_epoch' : val_acc_epoch,
-				'max_val_acc' : max_val_acc,
+				'train_loss_epoch': train_loss_epoch,
+				'min_train_loss': min_train_loss,
+				'train_acc_epoch': train_acc_epoch,
+				'max_train_acc': max_train_acc,
+				'val_loss_epoch': val_loss_epoch,
+				'min_val_loss': min_val_loss,
+				'val_acc_epoch': val_acc_epoch,
+				'max_val_acc': max_val_acc,
 				'val_bleu_epoch': val_bleu_epoch[0],
 				'max_val_bleu': max_val_bleu
 			}
@@ -453,19 +467,19 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 				save_checkpoint(state, epoch + epoch_offset, logger, config.model_path, config.ckpt)
 			estop_count = 0
 		else:
-			estop_count+=1
+			estop_count += 1
 
 		if config.save_writer and writer:
 			writer.add_scalar('loss/val_loss', val_loss_epoch, epoch + epoch_offset)
-			writer.add_scalar('acc/val_score', val_score_epoch[0], epoch + epoch_offset)
+			writer.add_scalar('acc/val_score', val_acc_epoch[0], epoch + epoch_offset)
 
 		od = OrderedDict()
 		od['Epoch'] = epoch + epoch_offset
 		od['best_epoch'] = best_epoch
 		od['train_loss_epoch'] = train_loss_epoch
 		od['min_train_loss'] = min_train_loss
-		od['val_loss_epoch']= val_loss_epoch
-		od['min_val_loss']= min_val_loss
+		od['val_loss_epoch'] = val_loss_epoch
+		od['min_val_loss'] = min_val_loss
 		od['train_acc_epoch'] = train_acc_epoch
 		od['max_train_acc'] = max_train_acc
 		od['val_acc_epoch'] = val_acc_epoch
@@ -478,7 +492,7 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 			for name, param in model.named_parameters():
 				writer.add_histogram(name, param, epoch + epoch_offset)
 
-		if estop_count >config.early_stopping:
+		if estop_count > config.early_stopping:
 			logger.debug('Early Stopping at Epoch: {} after no improvement in {} epochs'.format(epoch, estop_count))
 			break
 
@@ -494,7 +508,8 @@ def train_model(model, train_dataloader, val_dataloader, voc1, voc2, device, con
 
 	return max_val_acc
 
-def run_validation(config, model, val_dataloader, voc1, voc2, device, logger, epoch_num, validation = True):
+
+def run_validation(config, model, val_dataloader, voc1, voc2, device, logger, epoch_num, validation=True):
 	'''
 		Args:
 			config (dict): command line arguments
@@ -522,10 +537,10 @@ def run_validation(config, model, val_dataloader, voc1, voc2, device, logger, ep
 	val_acc_epoch_cnt = 0.0
 	val_acc_epoch_tot = 0.0
 
-	model.eval() # Set specific layers such as dropout to evaluation mode
+	model.eval()  # Set specific layers such as dropout to evaluation mode
 
-	refs= []
-	hyps= []
+	refs = []
+	hyps = []
 
 	if config.mode == 'test':
 		questions, gen_eqns, act_eqns, scores = [], [], [], []
@@ -538,8 +553,8 @@ def run_validation(config, model, val_dataloader, voc1, voc2, device, logger, ep
 		f_out.write('---------------------------------------\n')
 	total_batches = len(val_dataloader)
 	for data in val_dataloader:
-		sent1s = sents_to_idx(voc1, data['ques'], config.max_length, flag = 0)
-		sent2s = sents_to_idx(voc2, data['eqn'], config.max_length, flag = 0)
+		sent1s = sents_to_idx(voc1, data['ques'], config.max_length, flag=0)
+		sent2s = sents_to_idx(voc2, data['eqn'], config.max_length, flag=0)
 		nums = data['nums']
 		ans = data['ans']
 		if config.grade_disp:
@@ -562,17 +577,18 @@ def run_validation(config, model, val_dataloader, voc1, voc2, device, logger, ep
 		val_acc_epoch_cnt += temp_acc_cnt
 		val_acc_epoch_tot += temp_acc_tot
 
-		sent1s = idx_to_sents(voc1, sent1_var, no_eos= True)
-		sent2s = idx_to_sents(voc2, sent2_var, no_eos= True)
+		sent1s = idx_to_sents(voc1, sent1_var, no_eos=True)
+		sent2s = idx_to_sents(voc2, sent2_var, no_eos=True)
 
 		refs += [[' '.join(sent2s[i])] for i in range(sent2_var.size(1))]
 		hyps += [' '.join(decoder_output[i]) for i in range(sent1_var.size(1))]
 
 		if config.mode == 'test':
-			questions+= data['ques']
+			questions += data['ques']
 			gen_eqns += [' '.join(decoder_output[i]) for i in range(sent1_var.size(1))]
 			act_eqns += [' '.join(sent2s[i]) for i in range(sent2_var.size(1))]
-			scores   += [cal_score([decoder_output[i]], [nums[i]], [ans[i]], [data['eqn'][i]])[0] for i in range(sent1_var.size(1))]
+			scores += [cal_score([decoder_output[i]], [nums[i]], [ans[i]], [data['eqn'][i]])[0] for i in
+					   range(sent1_var.size(1))]
 
 		with open(config.outputs_path + '/outputs.txt', 'a') as f_out:
 			f_out.write('Batch: ' + str(batch_num) + '\n')
@@ -634,17 +650,17 @@ def run_validation(config, model, val_dataloader, voc1, voc2, device, logger, ep
 					break
 
 		val_loss_epoch += val_loss
-		print("Completed {} / {}...".format(batch_num, total_batches), end = '\r', flush = True)
+		print("Completed {} / {}...".format(batch_num, total_batches), end='\r', flush=True)
 		batch_num += 1
 
 	val_bleu_epoch = bleu_scorer(refs, hyps)
 	if config.mode == 'test':
 		results_df = pd.DataFrame([questions, act_eqns, gen_eqns, scores]).transpose()
 		results_df.columns = ['Question', 'Actual Equation', 'Generated Equation', 'Score']
-		csv_file_path = os.path.join(config.outputs_path, config.dataset+'.csv')
-		results_df.to_csv(csv_file_path, index = False)
-		return sum(scores)/len(scores)
+		csv_file_path = os.path.join(config.outputs_path, config.dataset + '.csv')
+		results_df.to_csv(csv_file_path, index=False)
+		return sum(scores) / len(scores)
 
-	val_acc_epoch = val_acc_epoch_cnt/val_acc_epoch_tot
+	val_acc_epoch = val_acc_epoch_cnt / val_acc_epoch_tot
 
-	return val_bleu_epoch, val_loss_epoch/len(val_dataloader), val_acc_epoch
+	return val_bleu_epoch, val_loss_epoch / len(val_dataloader), val_acc_epoch
